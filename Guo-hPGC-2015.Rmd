@@ -1,0 +1,209 @@
+---
+title: "Guo-hPGC-2015"
+author: "Belinda Phipson"
+date: "06/02/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This is single cell data from the paper:
+Guo, F. et al. The Transcriptome and DNA Methylome Landscapes of Human Primordial Germ Cells. Cell 161, 1437–1452 (2015).
+
+I downloaded the processed data from the Conquer website:
+http://imlspenticton.uzh.ch:3838/conquer/
+
+The data has been processed using a pseudo-alignment algorithm, Salmon. The output includes estimated counts, the estimated abundance, which is corrected for gene length, and the gene length.
+
+The cells are human primordial germ cells.
+
+The authors have made all data available in GEO under accession GSE63818:
+https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE63818
+
+
+# Reading in the data
+
+```{r,cache=FALSE}
+library(edgeR)
+library(RColorBrewer)
+library(org.Hs.eg.db)
+library(limma)
+```
+
+```{r}
+source("/group/bioi1/belinda/SingleCell/Normalisation/normCounts.R")
+```
+```{r}
+ggplotColors <- function(g){
+
+  d <- 360/g
+
+  h <- cumsum(c(15, rep(d,g - 1)))
+
+  hcl(h = h, c = 100, l = 65)
+
+}
+```
+
+```{r}
+load("/group/bioi1/shared/public_data/ConquerDatasets/GSE63818-GPL16791/txiProcessed.Rdata")
+counts <- txi.salmon$counts
+tpm <- txi.salmon$abundance
+names(txi.salmon)
+
+# Load in featureCounts hg38 length information
+hg38.length <- read.table("hg38-length.txt",header=TRUE,stringsAsFactors = FALSE)
+
+```
+
+# Quality control
+## Filtering of the cells
+
+The pool and split cells are in columns 319 - 328 of the counts matrix, and the PGC single cells are in column 1 - 233. The somatic cells are in columns 233 - 319 of the counts matrix. For the purpose of this analysis, we only take the PGCs.
+
+There do not appear to be any ERCC spike in controls in this dataset, hence we base our cell filtering on dropout and library size. In fact, in this dataset, there are no cells with more than 90% dropout and library size less than 500000. However, 144 cells have dropout > 80%. Hence we go for a less stringent criteria and filter out cells with > 85% dropout
+
+The MDSplot showing PC1 and PC2 doesn't display any glaringly obvious artefacts and hence we include all cells for further analysis.
+
+```{r,cache=TRUE}
+# The pool and split cells are in the counts matrix (columns 319 - 328)
+#GSM1677791 - GSM1677800
+# PGCs 1 - 233
+# somatic cells 233-319
+# Take only the PGCs
+keep.cells <- c(1:233)
+counts.pgc <- counts[,keep.cells]
+tpm.pgc <- tpm[,keep.cells]
+```
+
+```{r}
+par(mar=c(5,4,2,2))
+par(mfrow=c(1,2))
+dropout <- colSums(counts.pgc==0)/nrow(counts.pgc)
+lib.size <- colSums(counts.pgc)
+plot(dropout,lib.size)
+abline(v=0.85,h=500000,lty=2,col=2)
+points(dropout[dropout>0.85],lib.size[dropout>0.85],col=2,pch=16)
+mycol <- rep(NA,ncol(counts.pgc))
+mycol[dropout>0.85] <- 2
+mycol[dropout<=0.85] <- 1
+plotMDS(DGEList(counts.pgc),pch=16,gene.selection = "common",col=mycol)
+
+counts.keep <- counts.pgc[,dropout<=0.85]
+tpm.keep <- tpm.pgc[,dropout<=0.85]
+dim(tpm.keep)
+```
+
+We keep `r ncol(counts.keep)` for further analysis.
+
+## Filtering of the genes
+
+We filter out genes with > 90% zero counts.
+
+```{r}
+propZ_genes <- rowSums(counts.keep==0)/ncol(counts.keep)
+counts.keep <- counts.keep[propZ_genes<=0.9,]
+tpm.keep <- tpm.keep[propZ_genes<=0.9,]
+dim(counts.keep)
+dim(tpm.keep)
+table(rownames(counts.keep)==rownames(tpm.keep))
+```
+
+This leaves `r nrow(counts.keep)` genes for further analysis.
+
+# Converting to DGEList, adding gene annotation
+```{r,cache=TRUE}
+y <- DGEList(counts.keep)
+y.tpm <- DGEList(tpm.keep)
+```
+
+```{r,cache=TRUE}
+#annotation
+ens <- toTable(org.Hs.egENSEMBL)
+m <- match(rownames(y),ens$ensembl_id)
+ann <- data.frame(Original_ID=rownames(y),ens[m,])
+rownames(ann) <- rownames(y)
+symbol <- toTable(org.Hs.egSYMBOL)
+m <- match(ann$gene_id,symbol$gene_id)
+ann$symbol <- symbol$symbol[m]
+chr <- toTable(org.Hs.egCHR)
+m <- match(ann$gene_id,chr$gene_id)
+ann$chr <- chr$chromosome[m]
+genename <- toTable(org.Hs.egGENENAME)
+m <- match(ann$gene_id,genename$gene_id)
+ann$genename <- genename$gene_name[m]
+m <- match(rownames(y),hg38.length$EnsID)
+ann$length <- hg38.length$Length[m]
+
+y$genes <- ann
+```
+
+# Filtering out additional genes based on annotation
+We decided to filter out mitochondrial and ribosomal genes, which tend to be very short, as well as genes that lack an Entrez gene id and gene length annotation. This was to clean up the dataset as much as possible and stick to well annotated genes.
+
+```{r}
+mito <- grep("mitochondrial",y$genes$genename)
+ribo <- grep("ribosomal",y$genes$genename)
+chrm <- grep("MT",y$genes$chr)
+junk <- unique(c(mito,ribo,chrm))
+length(junk)
+y <- y[-junk,]
+y <- y[!is.na(y$genes$gene_id),]
+y <- y[!is.na(y$genes$length),]
+dim(y)
+y$samples$lib.size <- colSums(y$counts)
+
+m <- match(rownames(y),rownames(y.tpm))
+y.tpm <- y.tpm[m,]
+table(rownames(y.tpm)==rownames(y))
+y.tpm$samples$lib.size <- colSums(y.tpm$counts)
+dim(y.tpm)
+```
+After removing these genes, there are `r nrow(y)` genes left for further analysis.
+
+# Gene length bias
+
+```{r,cache=TRUE}
+lcpm <- normCounts(y,log=TRUE,prior.count=1)
+lrpkm <- rpkm(y,log=TRUE,prior.count=1)
+propZ_genes <- rowSums(y$counts==0)/ncol(y)
+```
+
+```{r}
+# Binning according to gene length
+q<-quantile(sqrt(y$genes$length),probs=seq(0.1,1,0.1))
+decile <- rep(NA,nrow(y))
+decile[sqrt(y$genes$length)<=q[1]] <- 1
+for(i in 2:10) decile[sqrt(y$genes$length)>q[i-1] & sqrt(y$genes$length)<=q[i]] <- i
+```
+
+# Figure for paper:
+
+```{r,fig1A,cache=FALSE,fig.width=12,fig.height=5}
+par(mar=c(8.5,4.5,3,2))
+par(mfrow=c(1,3))
+par(mgp=c(3,1,0))
+
+q2 <- c(0,q^2)
+labels <- rep(NA,10)
+for(i in 1:10) labels[i] <-paste(round(q2[i]),"-",round(q2[i+1]),sep="")
+
+boxplot(rowMeans(lcpm)~decile,ylab="AvgLogCounts",cex.lab=1.5,cex.axis=1.2,names=labels,las=2,ylim=c(0,8))
+title("(d) Human PGCs,  full-length",cex.main=1.5)
+title(xlab="Gene length",cex.lab=1.5,line=7)
+boxplot(propZ_genes~decile,ylab="Proportion zeroes in each gene",cex.lab=1.5,cex.axis=1.2,names=labels,las=2)
+title("(e) Human PGCs,  full-length",cex.main=1.5)
+title(xlab="Gene length",cex.lab=1.5,line=7)
+boxplot(rowMeans(lrpkm)~decile,ylab="AvgLogRPKM",cex.lab=1.5,cex.axis=1.2,names=labels,las=2)
+title("(f) Human PGCs,  full-length",cex.main=1.5)
+title(xlab="Gene length",cex.lab=1.5,line=7)
+```
+
+```{r}
+save(lcpm,decile,labels,propZ_genes,lrpkm,file="./figuresForPaper/fig1B.Rdata")
+```
+

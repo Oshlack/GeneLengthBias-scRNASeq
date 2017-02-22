@@ -1,0 +1,458 @@
+---
+title: "mESCs-analysis-final"
+author: "Belinda Phipson"
+date: "17/02/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This analysis combines four different mouse ESCs datasets, all generated from different labs. There are two full-length (Kolodziejczyk et al 2015, Buettner et al, 2015) and two UMI datasets (Zeigenhain et al 2016, SCRB-Seq, Grun et al, 2014, CEL-Seq).
+
+# Load R libraries, and useful R functions
+
+```{r,libraries,cache=FALSE}
+library(edgeR)
+library(RColorBrewer)
+library(org.Mm.eg.db)
+library(limma)
+library(scran)
+```
+```{r,myRfunctions}
+source("/group/bioi1/belinda/SingleCell/Normalisation/normCounts.R")
+```
+```{r}
+ggplotColors <- function(g){
+
+  d <- 360/g
+
+  h <- cumsum(c(15, rep(d,g - 1)))
+
+  hcl(h = h, c = 100, l = 65)
+
+}
+```
+
+# Reading in the datasets
+
+```{r}
+# Read in Kolodziejczyk
+load("./mESCs-data/kol.Rdata")
+
+# Read in Buettner data
+load("./mESCs-data/buett.Rdata")
+
+# Read in Grun data
+load("./mESCs-data/grun.Rdata")
+
+# Read in Zeigenhain data
+load("./mESCs-data/zeig.Rdata")
+
+# load mm10 gene length information
+mm10.length <- read.table("mm10-length.txt",header=TRUE,stringsAsFactors = FALSE)
+```
+
+# Combine data together for MDSplot
+```{r}
+# First combine full-length data
+m <- match(rownames(y.buett),rownames(y.kol))
+full.data <- cbind(y.buett$counts[!is.na(m),],y.kol$counts[m[!is.na(m)],])
+rownames(full.data) <- y.buett$genes$gene_id[!is.na(m)]
+
+# Then combine UMI data
+m <- match(y.grun$genes$gene_id,y.zeig$genes$gene_id)
+umi.data <- cbind(y.grun$counts[!is.na(m),],y.zeig$counts[m[!is.na(m)],])
+rownames(umi.data) <- y.grun$genes$gene_id[!is.na(m)]
+
+# Combine full and UMI
+m <- match(rownames(umi.data),rownames(full.data))
+all.data <- cbind(umi.data[!is.na(m),],full.data[m[!is.na(m)],])
+
+datasets <- rep(c("Grun-UMI-J1","Zeig-UMI-J1","Buettner-Full-Rex1","Kolodz-Full-G4"),c(ncol(y.grun),ncol(y.zeig),ncol(y.buett),ncol(y.kol)))
+
+prot <- rep(c("umi","full-length"),c(ncol(y.grun)+ncol(y.zeig),ncol(y.buett)+ncol(y.kol)))
+
+
+table(datasets)
+
+```
+
+```{r}
+par(mfrow=c(1,2))
+par(mar=c(5,5,2,2))
+plotMDS.DGEList(DGEList(all.data),pch=c(1,4)[factor(prot)],col=ggplotColors(4)[factor(datasets)],gene.selection = "common",cex.axis=1.2,cex.lab=1.5)
+legend("topleft",legend=levels(factor(datasets)),fill=ggplotColors(4))
+legend("top",legend=levels(factor(prot)),pch=c(1,4))
+
+media <- c(as.character(y.grun$samples$group),rep("serum+2i",ncol(y.zeig)),rep("Std2i",ncol(y.buett)),as.character(y.kol$samples$group))
+media2 <- media
+media2[media=="2i" | media=="standard 2i media + LIF"] <- c("Std2i")
+media2[media=="serum" | media=="serum + LIF"] <- c("serum")
+media2[media=="alternative 2i media + LIF"] <- c("Alt2i")
+         
+
+plotMDS.DGEList(DGEList(all.data),pch=c(1:3,22)[factor(datasets)],col=ggplotColors(4)[factor(media2)],gene.selection = "common",dim=c(2,3),cex.axis=1.2,cex.lab=1.5)
+legend("bottomleft",legend=levels(factor(media2)),col=ggplotColors(4),pch=16)
+legend("bottomright",legend=levels(factor(datasets)),pch=c(1:3,22),cex=0.8)
+
+
+# check cell type
+cell.type <- datasets
+cell.type[grep("J1",datasets)] <- "J1"
+cell.type[grep("Rex1",datasets)] <- "Rex1"
+cell.type[grep("G4",datasets)] <- "G4"
+
+zeig.rep <- rep(NA,ncol(y.zeig))
+zeig.rep[grep("SCRBseqA",colnames(y.zeig))] <- "Zeig-UMI-J1-RepA"
+zeig.rep[grep("SCRBseqB",colnames(y.zeig))] <- "Zeig-UMI-J1-RepB"
+datasets2 <- datasets
+datasets2[datasets=="Zeig-UMI-J1"] <- zeig.rep
+
+par(mfrow=c(1,2))
+plotMDS.DGEList(DGEList(all.data),pch=c(1:3,15,22)[factor(datasets2)],col=ggplotColors(4)[factor(media2)],gene.selection = "common",dim=c(2,3),cex.axis=1.2,cex.lab=1.5)
+legend("bottomleft",legend=levels(factor(media2)),col=ggplotColors(4),pch=16)
+legend("bottomright",legend=levels(factor(datasets2)),pch=c(1:3,15,22),cex=0.8)
+title("Coloured by media")
+
+plotMDS.DGEList(DGEList(all.data),pch=c(1:3,15,22)[factor(datasets2)],col=ggplotColors(3)[factor(cell.type)],gene.selection = "common",dim=c(2,3),cex.axis=1.2,cex.lab=1.5)
+legend("bottomleft",legend=levels(factor(cell.type)),col=ggplotColors(3),pch=16)
+legend("bottomright",legend=levels(factor(datasets2)),pch=c(1:3,15,22),cex=0.8)
+title("Coloured by mESC cell line")
+```
+
+# Gene length figures
+## Figure 3
+
+```{r}
+pdf(file="./figuresForPaper/Fig3-mESCs.pdf",width=11,height=8)
+
+par(mar=c(5,5,2,2))
+par(mfrow=c(2,3))
+par(mgp=c(3,1,0))
+
+plotMDS.DGEList(DGEList(all.data),pch=c(1,4)[factor(prot)],col=ggplotColors(8)[5:8][factor(datasets)],gene.selection = "common",cex.axis=1.2,cex.lab=1.5)
+legend("topleft",legend=levels(factor(datasets)),fill=ggplotColors(8)[5:8])
+legend("bottom",legend=levels(factor(prot)),pch=c(1,4))
+title("(a) Coloured by dataset",cex.main=1.5)
+
+plotMDS.DGEList(DGEList(all.data),pch=c(1:3,15,22)[factor(datasets2)],col=ggplotColors(8)[1:4][factor(media2)],gene.selection = "common",dim=c(2,3),cex.axis=1.2,cex.lab=1.5,xlim=c(-1.5,2.35))
+legend("bottomleft",legend=levels(factor(media2)),col=ggplotColors(8)[1:4],pch=16)
+legend("bottomright",legend=levels(factor(datasets2)),pch=c(1:3,15,22),cex=0.8)
+title("(b) Coloured by media",cex.main=1.5)
+
+par(mar=c(8.5,4.5,3,2))
+load("./figuresForPaper/fig1A.Rdata")
+boxplot(rowMeans(lcpm)~decile,ylab="AvgLogCounts",cex.lab=1.5,cex.axis=1.2,names=labels,las=2,ylim=c(0,12),col=ggplotColors(8)[7])
+title("(c) Kolodziejczyk, C1 full-length",cex.main=1.5)
+title(xlab="Gene length",cex.lab=1.5,line=7)
+abline(h=median(rowMeans(lcpm)[decile==1]),col=colors()[322],lty=5)
+
+
+load("./figuresForPaper/Buett-genelength.Rdata")
+boxplot(rowMeans(lcpm)~decile,ylab="AvgLogCounts",cex.lab=1.5,cex.axis=1.2,names=labels,las=2,ylim=c(0,12),col=ggplotColors(8)[5])
+title("(d) Buetnner, C1 full-length",cex.main=1.5)
+title(xlab="Gene length",cex.lab=1.5,line=7)
+abline(h=median(rowMeans(lcpm)[decile==1]),col=colors()[322],lty=5)
+
+load("./figuresForPaper/Grun-fig2Ai.Rdata")
+boxplot(rowMeans(lcpm)~decile,ylab="AvgLogCounts",cex.lab=1.5,cex.axis=1.2,names=labels,las=2,ylim=c(-0.05,3),col=ggplotColors(8)[6])
+title("(e) Grun, CEL-Seq UMI",cex.main=1.5)
+title(xlab="Gene length",cex.lab=1.5,line=7)
+abline(h=median(rowMeans(lcpm)[decile==1]),col=colors()[322],lty=5)
+
+load("./figuresForPaper/Zeig-fig2Aii.Rdata")
+boxplot(rowMeans(lcpm)~decile,ylab="AvgLogCounts",cex.lab=1.5,cex.axis=1.2,names=labels,las=2,ylim=c(-0.07,3),col=ggplotColors(8)[8])
+title("(f) Zeigenhain, SCRB-seq UMI",cex.main=1.5)
+title(xlab="Gene length",cex.lab=1.5,line=7)
+abline(h=median(rowMeans(lcpm)[decile==1]),col=colors()[322],lty=5)
+
+dev.off()
+```
+
+# Genes present in UMI vs full-length
+
+There are 188 genes detected in both UMI datasets that are not detected in both full-length datasets. These tend to be a bit shorter compared to the background distribution. The 2644 genes detected only in full-length and not in UMI tend to be a bit longer than the UMI genes, and look quite similar to the background.
+
+```{r}
+# Supplementary figure?
+umi.unq <- rownames(umi.data)[!(rownames(umi.data) %in% rownames(full.data))]
+full.unq <- rownames(full.data)[!(rownames(full.data) %in% rownames(umi.data))]
+overlap <- rownames(umi.data)[rownames(umi.data) %in% rownames(full.data)]
+
+umi.unq.length <- y.grun$genes$length[match(umi.unq,y.grun$genes$gene_id)]
+full.unq.length <- y.buett$genes$length[match(full.unq,y.buett$genes$gene_id)]
+overlap.length <- y.grun$genes$length[match(overlap,y.grun$genes$gene_id)]
+
+all_ids <- unique(c(rownames(y.kol),rownames(y.buett),rownames(y.zeig),y.grun$genes$ensembl_id))
+
+ens <- toTable(org.Mm.egENSEMBL2EG)
+m <- match(all_ids,ens$ensembl_id)
+all_ids_EG <- ens$gene_id[m]
+```
+```{r}
+pdf(file="./figuresForPaper/SuppFig1.pdf",width=9,height=7)
+par(mfrow=c(1,1))
+par(mar=c(5,5,2,2))
+plot(density(log10(mm10.length$Length[match(all_ids,mm10.length$EnsID)])),lwd=2,col=1,lty=2,main="",xlab="Log10(Gene length)",cex.lab=1.5,cex.axis=1.2,ylim=c(0,1.35))
+lines(density(log10(umi.unq.length)),lwd=2,col="blue")
+lines(density(log10(full.unq.length)),lwd=2,col="red")
+lines(density(log10(overlap.length)),lwd=2,col="grey")
+legend("topleft",legend=c("Detected in any (n=13434)","Unique to UMI (n=188)","Unique to full-length (n=2644)","Overlap (n=8678)"),lwd=2,col=c(1,4,2,"grey"),lty=c(2,1,1,1))
+dev.off()
+```
+
+```{r}
+lcpm.umi <- normCounts(DGEList(umi.data),log=TRUE,prior.count=1)
+lcpm.full <- normCounts(DGEList(full.data),log=TRUE,prior.count=1)
+
+boxplot(rowMeans(lcpm.umi),rowMeans(lcpm.umi)[match(umi.unq,rownames(lcpm.umi))],
+        rowMeans(lcpm.umi)[match(overlap,rownames(lcpm.umi))],
+        rowMeans(lcpm.full),rowMeans(lcpm.full)[match(full.unq,rownames(lcpm.full))],
+        rowMeans(lcpm.full)[match(overlap,rownames(lcpm.full))],
+        ylab="Average log counts",col=c(4,4,"grey",2,2,"grey"),
+        names=c("All UMI","UMI unique","UMI overlap","All Full","Full unique","Full overlap"),
+        cex.lab=1.5,cex.axis=1)
+
+```
+
+```{r}
+vennDiagram(cbind(all_ids_EG %in% rownames(umi.data),all_ids_EG %in% rownames(full.data)),names=c("UMI","full-length"),circle.col=c(4,2))
+title("Detection rate",cex.main=2)
+```
+
+```{r}
+pdf(file="./figuresForPaper/DetectionRateFig.pdf",width=12,height=4)
+par(mfrow=c(1,3))
+par(mar=c(4,4,2,2))
+vennDiagram(cbind(all_ids_EG %in% rownames(umi.data),all_ids_EG %in% rownames(full.data)),names=c("UMI","full-length"),circle.col=c(4,2))
+title("(a) Detection rate",cex.main=2)
+par(mar=c(5,5,2,2))
+plot(density(log10(mm10.length$Length[match(all_ids,mm10.length$EnsID)])),lwd=2,col=1,lty=2,main="",xlab="Log10(Gene length)",cex.lab=1.5,cex.axis=1.2,ylim=c(0,1.35))
+lines(density(log10(overlap.length)),lwd=2,col="grey")
+lines(density(log10(umi.unq.length)),lwd=2,col="blue")
+lines(density(log10(full.unq.length)),lwd=2,col="red")
+legend("topleft",legend=c("Detected in any (n=13434)","Unique to UMI (n=188)","Unique to full-length (n=2644)","Overlap (n=8678)"),lwd=2,col=c(1,4,2,"grey"),lty=c(2,1,1,1),cex=0.8,bty="n")
+title("(b) Gene length density",cex.main="2")
+par(mar=c(6,5.5,2,2))
+boxplot(rowMeans(lcpm.umi),rowMeans(lcpm.umi)[match(umi.unq,rownames(lcpm.umi))],
+        rowMeans(lcpm.umi)[match(overlap,rownames(lcpm.umi))],
+        rowMeans(lcpm.full),rowMeans(lcpm.full)[match(full.unq,rownames(lcpm.full))],
+        rowMeans(lcpm.full)[match(overlap,rownames(lcpm.full))],
+        ylab="Average log counts",col=c(4,4,"grey",2,2,"grey"),
+        names=c("All UMI","UMI unique","UMI overlap","All Full","Full unique","Full overlap"),
+        cex.lab=1.5,cex.axis=1,las=2)
+title("Unique genes: Average log-counts",cex.main=2)
+dev.off()
+```
+
+```{r}
+pdf(file="./figuresForPaper/SuppFig1.pdf",width=7,height=7)
+par(mfrow=c(1,1))
+par(mar=c(6,5.5,2,2))
+boxplot(rowMeans(lcpm.umi),rowMeans(lcpm.umi)[match(umi.unq,rownames(lcpm.umi))],
+        rowMeans(lcpm.umi)[match(overlap,rownames(lcpm.umi))],
+        rowMeans(lcpm.full),rowMeans(lcpm.full)[match(full.unq,rownames(lcpm.full))],
+        rowMeans(lcpm.full)[match(overlap,rownames(lcpm.full))],
+        ylab="Average log counts",col=c(4,4,"grey",2,2,"grey"),
+        names=c("All UMI","UMI unique","UMI overlap","All Full","Full unique","Full overlap"),
+        cex.lab=1.5,cex.axis=1,las=2)
+title("Unique genes: Average log-counts",cex.main=2)
+dev.off()
+
+```
+
+
+```{r}
+# wilcoxon rank sum test for shift in location of length unique genes
+wilcox.test(log10(umi.unq.length),log10(full.unq.length))
+```
+
+
+## GO analysis of unique UMI and full-length genes
+
+```{r}
+# Get median gene length in each GO category
+ens <- toTable(org.Mm.egENSEMBL2EG)
+go <- toTable(org.Mm.egGO2ALLEGS)
+d <- duplicated(go[,c("gene_id", "go_id", "Ontology")])
+go <- go[!d, ]
+m <- match(go$gene_id,ens$gene_id)
+test <- data.frame(go,ens[m,])
+
+m <- match(test$ensembl_id,mm10.length$EnsID)
+test$length <- mm10.length$Length[m]
+head(test)
+test <- test[!is.na(test$length),]
+# Median gene length in each GO category
+avg.go.length <- tapply(test$length,test$go_id,median)
+par(mar=c(5,4,2,2))
+plot(density(log10(avg.go.length)))
+```
+```{r}
+go.unq.umi <- goana(de=umi.unq,universe=rownames(umi.data),species="Mm")
+m <- match(rownames(go.unq.umi),names(avg.go.length))
+go.unq.umi$length <- avg.go.length[m]
+
+go.unq.umi <- go.unq.umi[go.unq.umi$N>=10,]
+topGO(go.unq.umi)
+median(go.unq.umi$length)
+quantile(go.unq.umi$length,probs=0.05)
+
+go.unq.full <- goana(de=full.unq,universe = rownames(full.data),species="Mm")
+m <- match(rownames(go.unq.full),names(avg.go.length))
+go.unq.full$length <- avg.go.length[m]
+go.unq.full <- go.unq.full[go.unq.full$N>=10,]
+topGO(go.unq.full)
+median(go.unq.full$length)
+quantile(go.unq.umi$length,probs=0.05)
+table(topGO(go.unq.full)$length <quantile(go.unq.umi$length,probs=0.05))
+table(topGO(go.unq.full,n=111)$length > 10000)
+
+table(p.adjust(go.unq.full$P.DE,method="fdr") < 0.05)
+table(p.adjust(go.unq.umi$P.DE,method="fdr") < 0.05)
+
+go.sig.full <- rownames(topGO(go.unq.full,n=111))
+go.sig.umi <- rownames(topGO(go.unq.umi,n=26))
+all.sig.go <- unique(c(go.sig.full,go.sig.umi)) 
+
+par(mfrow=c(1,2))
+par(mar=c(4.5,4.5,2,2))
+vennDiagram(cbind(all.sig.go %in% go.sig.umi,all.sig.go %in% go.sig.full),names=c("UMI","Full-length"),circle.col=c(4,2))
+title("Overlap of GO categories",cex.main=2)
+plot(density(log10(topGO(go.unq.umi,n=26)$length)),ylim=c(0,5),col=4,lwd=2,main="",xlab="log10(median GO category length",cex.lab=1.5,cex.axis=1.2,cex.main=2)
+lines(density(log10(topGO(go.unq.full,n=111)$length)),col=2,lwd=2)
+```
+
+```{r}
+plot(density(log10(topGO(go.unq.umi,n=100)$length)),ylim=c(0,5),col=4,lwd=2,main="Density plot of avg lengths of top 100 GO",xlab="log10(median GO category length",cex.lab=1.5,cex.axis=1.2,cex.main=2,xlim=c(2.6,4.15))
+lines(density(log10(topGO(go.unq.full,n=100)$length)),col=2,lwd=2)
+abline(v=log10(median(go.unq.umi$length)),lty=2)
+legend("topleft",legend=c("UMI","full-length"),lty=1,col=c(4,2))
+legend("topleft",legend=c("UMI","full-length"),lty=1,col=c(4,2),lwd=2)
+```
+
+```{r}
+pdf(file="./figuresForPaper/DetectionRateFig.pdf",width=10,height=10)
+par(mfrow=c(2,2))
+par(mar=c(4,4,2,2))
+vennDiagram(cbind(all_ids_EG %in% rownames(umi.data),all_ids_EG %in% rownames(full.data)),names=c("UMI","full-length"),circle.col=c(4,2))
+title("(a) Overlap of detected genes",cex.main=2)
+par(mar=c(5,5,2,2))
+plot(density(log10(mm10.length$Length[match(all_ids,mm10.length$EnsID)])),lwd=1,col=1,lty=2,main="",xlab="Log10(Gene length)",cex.lab=1.5,cex.axis=1.2,ylim=c(0,1.35))
+lines(density(log10(overlap.length)),lwd=2,col="grey")
+lines(density(log10(umi.unq.length)),lwd=2,col="blue")
+lines(density(log10(full.unq.length)),lwd=2,col="red")
+legend("topleft",legend=c("Detected in any (n=13434)","Unique to UMI (n=188)","Unique to full-length (n=2644)","Overlap (n=8678)"),lwd=c(1,2,2,2),col=c(1,4,2,"grey"),lty=c(2,1,1,1),cex=0.8,bty="n")
+title("(b) Gene length density",cex.main="2")
+par(mar=c(4.5,4.5,2,2))
+vennDiagram(cbind(all.sig.go %in% go.sig.umi,all.sig.go %in% go.sig.full),names=c("UMI","Full-length"),circle.col=c(4,2))
+title("(c) Unique genes: GO overlap",cex.main=2)
+plot(density(log10(topGO(go.unq.umi,n=26)$length)),ylim=c(0,5),col=4,lwd=2,main="",xlab="log10(median GO category length)",cex.lab=1.5,cex.axis=1.2,cex.main=2)
+lines(density(log10(topGO(go.unq.full,n=111)$length)),col=2,lwd=2)
+title("(d) Significant GO categories ",cex.main=2)
+legend("topleft",legend=c("UMI","full-length","Median GO length"),lty=c(1,1,2),col=c(4,2,1),lwd=2)
+abline(v=log10(median(go.unq.umi$length)),lty=2)
+dev.off()
+```
+
+```{r}
+go.unq.umi$FDR <- p.adjust(go.unq.umi$P.DE,method="fdr")
+go.unq.full$FDR <- p.adjust(go.unq.full$P.DE,method="fdr")
+write.csv(topGO(go.unq.umi,n=Inf),file="GO-results-uniqueUMIgenes.csv",quote=FALSE,row.names = TRUE)
+write.csv(topGO(go.unq.full,n=Inf),file="GO-results-uniqueFULLgenes.csv",quote=FALSE,row.names = TRUE)
+```
+
+# Differential expression analysis between 2i and serum media
+
+## Full-length data
+
+```{r}
+media.kol <- as.character(y.kol$samples$group)
+table(media.kol)
+media.kol[media.kol=="alternative 2i media + LIF"] <- "Alt2i"
+media.kol[media.kol=="standard 2i media + LIF"] <- "Std2i"
+media.kol[media.kol=="serum + LIF"] <- "serum"
+
+des.kol <- model.matrix(~0+factor(media.kol))
+colnames(des.kol) <- levels(factor(media.kol))
+
+y.kol <- estimateDisp(y.kol,des.kol,robust=TRUE)
+plotBCV(y.kol)
+
+fit.kol <- glmFit(y.kol,des.kol)
+## Use treat to impose logFC cut-off
+treat.kol <- glmTreat(fit.kol,contrast=c(0,-1,1),lfc=1)
+res.treat.kol <- decideTestsDGE(treat.kol)
+summary(res.treat.kol)
+plotMD(treat.kol,status = res.treat.kol)
+lines(lowess(treat.kol$AveLogCPM,treat.kol$table$logFC),lwd=2,col=4)
+topTags(treat.kol)
+```
+
+## UMI data
+
+The UMI data needs some form of normalisation for composition bias. The MD plot is a little strange, and simply applying a scaling factor is not going to completely fix the problem. However, I did note that both TMM and scran help somewhat with the composition bias problem.
+
+```{r}
+media.grun <- as.character(y.grun$samples$group)
+media.grun[media.grun=="2i"] <- "Std2i"
+table(media.grun)
+
+des.grun <- model.matrix(~0+factor(media.grun))
+colnames(des.grun) <- levels(factor(media.grun))
+
+# Set up SCE object
+sce.grun <- newSCESet(countData=y.grun$counts)
+sce.grun <- calculateQCMetrics(sce.grun)
+sce.grun <- computeSumFactors(sce.grun,cluster=media.grun,sizes=c(5,10,15,20,25))
+summary(sizeFactors(sce.grun))
+y.scran.grun <- convertTo(sce.grun, type="edgeR")
+y.scran.grun$genes <- y.grun$genes
+
+y.scran.grun <- estimateDisp(y.scran.grun,des.grun,robust=TRUE)
+plotBCV(y.scran.grun)
+
+fit.scran.grun <- glmFit(y.scran.grun,des.grun)
+
+# Use treat to impose logFC cut-off
+treat.grun <- glmTreat(fit.scran.grun,contrast=c(-1,1),lfc=0.5)
+res.treat.grun <- decideTestsDGE(treat.grun)
+summary(res.treat.grun)
+plotMD(treat.grun,status = res.treat.grun)
+lines(lowess(treat.grun$AveLogCPM,treat.grun$table$logFC),lwd=2,col=4)
+topTags(treat.grun)
+```
+
+# Any overlaps with the uniquely detected genes?
+```{r}
+toptreat.kol <- topTags(treat.kol,n=Inf,p.value=0.05)$table
+toptreat.grun <- topTags(treat.grun,n=Inf,p.value = 0.05)$table
+sum(umi.unq %in% toptreat.grun$gene_id)
+sum(full.unq %in% toptreat.kol$gene_id)
+```
+
+# GO analysis of DE genes
+
+```{r}
+go.kol <- goana(de=toptreat.kol$gene_id,universe = treat.kol$genes$gene_id,species="Mm")
+go.kol$FDR <- p.adjust(go.kol$P.DE,method="fdr")
+
+go.grun <- goana(de=toptreat.grun$gene_id,universe = treat.grun$genes$gene_id,species="Mm")
+go.grun$FDR <- p.adjust(go.grun$P.DE,method="fdr")
+
+sum(rownames(go.unq.umi)[go.unq.umi$FDR<0.05] %in% rownames(go.grun)[go.grun$FDR<0.05])
+
+sum(rownames(go.unq.full)[go.unq.full$FDR<0.05] %in% rownames(go.kol)[go.kol$FDR<0.05])
+
+sum(rownames(go.unq.umi)[go.unq.umi$FDR<0.05] %in% rownames(go.kol)[go.kol$FDR<0.05])
+
+sum(rownames(go.unq.full)[go.unq.full$FDR<0.05] %in% rownames(go.grun)[go.grun$FDR<0.05])
+
+sum(rownames(go.grun)[go.grun$FDR<0.05] %in% rownames(go.kol)[go.kol$FDR<0.05])
+```
+
+

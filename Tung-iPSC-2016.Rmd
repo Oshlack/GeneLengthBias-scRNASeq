@@ -1,0 +1,201 @@
+---
+title: "Tung-hIPSCs-2016"
+author: "Belinda Phipson"
+date: "07/02/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This is human induced pluripotent stem cell single cells from the paper:
+Tung, P.-Y. et al. Batch effects and the effective design of single-cell gene expression studies. bioRxiv 62919 (2016). doi:10.1101/062919
+
+We obtained the count data from the github repository:
+https://github.com/jdblischak/singleCellSeq
+
+The data has been deposited in GEO under accession number GSE77288:
+http://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE77288
+
+The main aim of the paper was to investigate the technical variation associated with sample processing using the single cell Fluidigm C1 platform. The authors processed three C1 replicates from three human induced pluripotent stem cell (iPSC) lines, and added UMIs to all samples.
+
+The data was processed using the Subjunc aligner, using the hg19 version of the genome.
+
+# Load R libraries, and useful R functions
+
+```{r,cache=FALSE}
+library(edgeR)
+library(RColorBrewer)
+library(org.Hs.eg.db)
+library(limma)
+```
+```{r}
+source("/group/bioi1/belinda/SingleCell/Normalisation/normCounts.R")
+```
+```{r}
+ggplotColors <- function(g){
+
+  d <- 360/g
+
+  h <- cumsum(c(15, rep(d,g - 1)))
+
+  hcl(h = h, c = 100, l = 65)
+
+}
+```
+
+# Reading in the data
+```{r}
+counts <- read.delim("/group/bioi1/shared/public_data/GiladSingleCellHapMap/data/molecules.txt",row.names=1,header=TRUE)
+
+targets <- read.delim("/group/bioi1/shared/public_data/GiladSingleCellHapMap/data/annotation.txt",header=TRUE,stringsAsFactors = FALSE)
+qc <- read.delim("/group/bioi1/shared/public_data/GiladSingleCellHapMap/data/qc-ipsc.txt",header=TRUE,stringsAsFactors = FALSE)
+qc$sample_id <- paste(qc$individual,qc$replicate,qc$well,sep=".")
+
+# Load in featureCounts hg38 length information
+hg38.length <- read.table("hg38-length.txt",header=TRUE,stringsAsFactors = FALSE)
+```
+
+```{r,cache=TRUE}
+# separate endogenous from ercc
+ercc <- grep("ERCC",rownames(counts))
+counts.ercc <- counts[ercc,]
+counts.end <- counts[-ercc,]
+```
+
+# Quality control
+## QC plots
+Before any analysis, the quality of the cells was examined by looking at metrics such as dropout and total library size of each cell. We also looked at the proportion of the sequencing taken up by the ERCC controls.
+
+```{r}
+# Calculate dropout and library size
+dropout <- colSums(counts.end==0)/nrow(counts.end)
+lib.size <- colSums(counts)
+lib.size.ercc <- colSums(counts.ercc)
+lib.size.end <- colSums(counts.end)
+```
+
+```{r}
+par(mar=c(5,4,2,2))
+par(mfrow=c(1,2))
+plot(dropout,lib.size.end,xlab="Proportion Zeroes in Single Cells",ylab="Library size",col=ggplotColors(9)[factor(targets$batch)])
+abline(h=30000,v=0.7,lty=2)
+legend("topright",pch=16,legend=levels(factor(targets$batch)),col=ggplotColors(9))
+plot(dropout,lib.size.ercc/lib.size,ylab="ERCC lib size/Total lib size",xlab="Proportion Zeroes in Single Cells",col=ggplotColors(9)[factor(targets$batch)])
+```
+
+## Filtering out cells
+We decide to filter out cells with > 70% dropout, smaller than 30000 library size, as well as one plate that looks like an outlier in the ERCC:total plot (NA19098.r2). We also filtered out cells that had a ratio of ERCC library size to total library size that had >= the minimum ratio in the bad plate.
+```{r}
+keep1 <- dropout<0.7 & lib.size.end>30000 & lib.size.ercc/lib.size < 0.03
+counts.keep <- counts.end[,keep1]
+targets.keep <-targets[keep1,]
+dim(counts.keep)
+```
+This leaves `r ncol(counts.keep)` cells for further analysis.
+
+## Filtering out genes
+We chose to filter out genes that had more than 90% zeroes.
+```{r}
+# Filter out genes where > 90% of the cells are zeroes
+propZ_genes <- rowSums(counts.keep==0)/ncol(counts.keep)
+counts.keep <- counts.keep[propZ_genes<=0.9,]
+dim(counts.keep)
+```
+This left `r nrow(counts.keep)` genes for further analysis. We finally check an MDSplot with PC1 and PC2.
+```{r}
+par(mfrow=c(1,1))
+plotMDS(DGEList(counts.keep),pch=16,gene.selection = "common",col=ggplotColors(8)[factor(targets.keep$batch)])
+legend("bottom",legend=levels(factor(targets.keep$batch)),fill=ggplotColors(8))
+```
+
+# Converting to DGEList, adding gene annotation
+```{r,cache=TRUE}
+y <- DGEList(counts.keep)
+```
+
+```{r,cache=TRUE}
+#annotation
+ens <- toTable(org.Hs.egENSEMBL)
+m <- match(rownames(y),ens$ensembl_id)
+ann <- data.frame(Original_ID=rownames(y),ens[m,])
+rownames(ann) <- rownames(y)
+symbol <- toTable(org.Hs.egSYMBOL)
+m <- match(ann$gene_id,symbol$gene_id)
+ann$symbol <- symbol$symbol[m]
+chr <- toTable(org.Hs.egCHR)
+m <- match(ann$gene_id,chr$gene_id)
+ann$chr <- chr$chromosome[m]
+genename <- toTable(org.Hs.egGENENAME)
+m <- match(ann$gene_id,genename$gene_id)
+ann$genename <- genename$gene_name[m]
+m <- match(rownames(y),hg38.length$EnsID)
+ann$length <- hg38.length$Length[m]
+
+y$genes <- ann
+```
+
+# Filtering out additional genes based on annotation
+We decided to filter out mitochondrial and ribosomal genes, which tend to be very short, as well as genes that lack an Entrez gene id and gene length annotation. This was to clean up the dataset as much as possible and stick to well annotated genes.
+
+```{r}
+mito <- grep("mitochondrial",y$genes$genename)
+ribo <- grep("ribosomal",y$genes$genename)
+chrm <- grep("MT",y$genes$chr)
+junk <- unique(c(mito,ribo,chrm))
+length(junk)
+y <- y[-junk,]
+y <- y[!is.na(y$genes$gene_id),]
+y <- y[!is.na(y$genes$length),]
+dim(y)
+y$samples$lib.size <- colSums(y$counts)
+```
+After removing these genes, there are `r nrow(y)` genes left for further analysis.
+
+# Gene length bias
+
+```{r,cache=TRUE}
+lcpm <- normCounts(y,log=TRUE,prior.count=1)
+lrpkm <- rpkm(y,log=TRUE,prior.count=1)
+propZ_genes <- rowSums(y$counts==0)/ncol(y)
+```
+
+```{r}
+# Binning according to gene length
+q<-quantile(sqrt(y$genes$length),probs=seq(0.1,1,0.1))
+decile <- rep(NA,nrow(y))
+decile[sqrt(y$genes$length)<=q[1]] <- 1
+for(i in 2:10) decile[sqrt(y$genes$length)>q[i-1] & sqrt(y$genes$length)<=q[i]] <- i
+```
+
+# Figure for paper:
+
+```{r,fig1A,cache=FALSE,fig.width=12,fig.height=5}
+par(mar=c(8.5,4.5,3,2))
+par(mfrow=c(1,3))
+par(mgp=c(3,1,0))
+
+q2 <- c(0,q^2)
+labels <- rep(NA,10)
+for(i in 1:10) labels[i] <-paste(round(q2[i]),"-",round(q2[i+1]),sep="")
+
+boxplot(rowMeans(lcpm)~decile,ylab="AvgLogCounts",cex.lab=1.5,cex.axis=1.2,names=labels,las=2,ylim=c(0,6))
+title("(d) Human iPSCs,  C1 umi",cex.main=1.5)
+title(xlab="Gene length",cex.lab=1.5,line=7)
+boxplot(propZ_genes~decile,ylab="Proportion zeroes in each gene",cex.lab=1.5,cex.axis=1.2,names=labels,las=2)
+title("(e) Human iPSCs,  C1 umi",cex.main=1.5)
+title(xlab="Gene length",cex.lab=1.5,line=7)
+boxplot(rowMeans(lrpkm)~decile,ylab="AvgLogRPKM",cex.lab=1.5,cex.axis=1.2,names=labels,las=2)
+title("(f) Human iPSCs,  C1 umi",cex.main=1.5)
+title(xlab="Gene length",cex.lab=1.5,line=7)
+```
+```{r}
+save(lcpm,decile,labels,propZ_genes,lrpkm,file="./figuresForPaper/Tung-fig2B.Rdata")
+```
+
+
+
+

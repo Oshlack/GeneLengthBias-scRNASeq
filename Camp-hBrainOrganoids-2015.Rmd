@@ -1,0 +1,205 @@
+---
+title: "Camp-organoids-2015"
+author: "Belinda Phipson"
+date: "06/02/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This is human cerebral organoid single cell data from the paper:
+Camp, J. G. et al. Human cerebral organoids recapitulate gene expression programs of fetal neocortex development. Proc. Natl. Acad. Sci. U. S. A. 112, 15672–7 (2015).
+
+The data was deposited by the authors in GEO under the accession number GSE75140:
+https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE75140
+
+# Processing
+
+The data was downloaded and processed by Luke Zappia using a bpipe pipeline. The quality of the raw sequencing reads was examined using FastQC v0.11.4 and they were checked for contamination by aligning a sample of reads to multiple reference genome using FastQ Screen v0.6.4. Reads were aligned to the hg38 human genome using STAR v2.5.2a and reads overlapping genes in an appropriate annotation (Gencode v22 for human) were counted using featureCounts v1.5.0-p3. This pipeline was constructed in Bpipe v0.9.9.3 and a report summarising the steps produced using MultiQC v0.8. 
+
+# Load R libraries, and useful R functions
+
+```{r,cache=FALSE}
+library(edgeR)
+library(RColorBrewer)
+library(org.Hs.eg.db)
+library(limma)
+```
+```{r}
+source("/group/bioi1/belinda/SingleCell/Normalisation/normCounts.R")
+```
+```{r}
+ggplotColors <- function(g){
+
+  d <- 360/g
+
+  h <- cumsum(c(15, rep(d,g - 1)))
+
+  hcl(h = h, c = 100, l = 65)
+
+}
+```
+
+# Reading in the data
+
+```{r}
+data <- read.delim("/group/bioi1/shared/public_data/Camp-CerebralOrganoid-scRNAseq/counts/counts.txt",skip=1,stringsAsFactors = FALSE)
+
+# Load in featureCounts hg38 length information
+hg38.length <- read.table("hg38-length.txt",header=TRUE,stringsAsFactors = FALSE)
+```
+
+```{r,cache=TRUE}
+counts <- data[,-(1:6)]
+rownames(counts) <- gsub("\\..*","",data[,1])
+# Tidy up column names
+colnames(counts) <- gsub("X\\.mnt\\.storage\\.shared\\.public_data\\.Camp\\.CerebralOrganoid\\.scRNAseq\\.mapped\\.2pass\\.","",colnames(counts))
+colnames(counts) <- gsub("\\.Aligned\\.out\\.bam","",colnames(counts))
+```
+
+
+```{r,cache=TRUE}
+# Separate into ERCC and endogenous genes
+ercc <- grep("ERCC",rownames(counts))
+counts.end <- counts[-ercc,]
+# Remove all zero genes
+counts.end <- counts.end[rowSums(counts.end)!=0,]
+counts.ercc <- counts[ercc,]
+```
+
+# Quality control
+## QC plots
+Before any analysis, the quality of the cells was examined by looking at metrics such as dropout and total library size of each cell. We also looked at the proportion of the sequencing taken up by the ERCC controls.
+
+```{r}
+# Calculate dropout and library size
+dropout <- colSums(counts.end==0)/nrow(counts.end)
+lib.size <- colSums(counts)
+lib.size.ercc <- colSums(counts.ercc)
+lib.size.end <- colSums(counts.end)
+```
+
+```{r}
+par(mar=c(5,4,2,2))
+par(mfrow=c(1,2))
+plot(dropout,lib.size.end,xlab="Proportion Zeroes in Single Cells",ylab="Library size")
+abline(h=500000,v=0.9,col=2)
+plot(dropout,lib.size.ercc/lib.size,ylab="ERCC lib size/Total lib size",xlab="Proportion Zeroes in Single Cells")
+abline(v=0.9,h=0.2,col=2)
+```
+
+
+## Filtering out cells
+We decide to quite stringently filter out cells with > 90% dropout, smaller than 500000 library size, as well as cells with more than 20% of the sequencing taken up by ERCC controls.
+```{r}
+keep1 <- dropout<0.9 & lib.size.end>500000 & lib.size.ercc/lib.size < 0.2
+y.keep <- counts.end[,keep1]
+dim(y.keep)
+```
+This leaves `r ncol(y.keep)` cells for further analysis.
+
+## Filtering out genes
+We chose to filter out genes that had more than 90% zeroes.
+```{r}
+# Filter out genes where > 90% of the cells are zeroes
+propZ_genes <- rowSums(y.keep==0)/ncol(y.keep)
+y.keep <- y.keep[propZ_genes<=0.9,]
+dim(y.keep)
+```
+This left `r nrow(y.keep)` genes for further analysis. We finally check an MDSplot with PC1 and PC2.
+```{r}
+par(mfrow=c(1,1))
+plotMDS(DGEList(y.keep),pch=16,gene.selection = "common")
+```
+
+# Converting to DGEList, adding gene annotation
+```{r,cache=TRUE}
+y <- DGEList(y.keep)
+```
+
+```{r,cache=TRUE}
+#annotation
+ens <- toTable(org.Hs.egENSEMBL)
+m <- match(rownames(y),ens$ensembl_id)
+ann <- data.frame(Original_ID=rownames(y),ens[m,])
+rownames(ann) <- rownames(y)
+symbol <- toTable(org.Hs.egSYMBOL)
+m <- match(ann$gene_id,symbol$gene_id)
+ann$symbol <- symbol$symbol[m]
+chr <- toTable(org.Hs.egCHR)
+m <- match(ann$gene_id,chr$gene_id)
+ann$chr <- chr$chromosome[m]
+genename <- toTable(org.Hs.egGENENAME)
+m <- match(ann$gene_id,genename$gene_id)
+ann$genename <- genename$gene_name[m]
+m <- match(rownames(y),hg38.length$EnsID)
+ann$length <- hg38.length$Length[m]
+
+y$genes <- ann
+```
+
+# Filtering out additional genes based on annotation
+We decided to filter out mitochondrial and ribosomal genes, which tend to be very short, as well as genes that lack an Entrez gene id and gene length annotation. This was to clean up the dataset as much as possible and stick to well annotated genes.
+
+```{r}
+mito <- grep("mitochondrial",y$genes$genename)
+ribo <- grep("ribosomal",y$genes$genename)
+chrm <- grep("MT",y$genes$chr)
+junk <- unique(c(mito,ribo,chrm))
+length(junk)
+y <- y[-junk,]
+y <- y[!is.na(y$genes$gene_id),]
+y <- y[!is.na(y$genes$length),]
+dim(y)
+y$samples$lib.size <- colSums(y$counts)
+```
+After removing these genes, there are `r nrow(y)` genes left for further analysis.
+
+# Gene length bias
+
+```{r,cache=TRUE}
+lcpm <- normCounts(y,log=TRUE,prior.count=1)
+lrpkm <- rpkm(y,log=TRUE,prior.count=1)
+propZ_genes <- rowSums(y$counts==0)/ncol(y)
+```
+
+```{r}
+# Binning according to gene length
+q<-quantile(sqrt(y$genes$length),probs=seq(0.1,1,0.1))
+decile <- rep(NA,nrow(y))
+decile[sqrt(y$genes$length)<=q[1]] <- 1
+for(i in 2:10) decile[sqrt(y$genes$length)>q[i-1] & sqrt(y$genes$length)<=q[i]] <- i
+```
+
+# Figure for paper:
+
+```{r,fig1A,cache=FALSE,fig.width=12,fig.height=5}
+par(mar=c(8.5,4.5,3,2))
+par(mfrow=c(1,3))
+par(mgp=c(3,1,0))
+
+q2 <- c(0,q^2)
+labels <- rep(NA,10)
+for(i in 1:10) labels[i] <-paste(round(q2[i]),"-",round(q2[i+1]),sep="")
+
+boxplot(rowMeans(lcpm)~decile,ylab="AvgLogCounts",cex.lab=1.5,cex.axis=1.2,names=labels,las=2,ylim=c(0,6))
+title("(g) Human cerebral organoids,  full-length",cex.main=1.5)
+title(xlab="Gene length",cex.lab=1.5,line=7)
+boxplot(propZ_genes~decile,ylab="Proportion zeroes in each gene",cex.lab=1.5,cex.axis=1.2,names=labels,las=2)
+title("(h) Human cerebral organoids,  full-length",cex.main=1.5)
+title(xlab="Gene length",cex.lab=1.5,line=7)
+boxplot(rowMeans(lrpkm)~decile,ylab="AvgLogRPKM",cex.lab=1.5,cex.axis=1.2,names=labels,las=2)
+title("(i) Human cerebral organoids,  full-length",cex.main=1.5)
+title(xlab="Gene length",cex.lab=1.5,line=7)
+```
+
+```{r}
+save(lcpm,decile,labels,propZ_genes,lrpkm,file="./figuresForPaper/fig1C.Rdata")
+```
+
+
+

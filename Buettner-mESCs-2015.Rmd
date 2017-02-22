@@ -1,0 +1,185 @@
+---
+title: "Buettner-mESC-2015"
+author: "Belinda Phipson"
+date: "08/02/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This is mouse embryonic stem cell data from Buettner, F. et al. Computational analysis of cell-to-cell heterogeneity in single-cell RNA-sequencing data reveals hidden subpopulations of cells. Nat. Biotechnol. 33, (2015).
+
+We downloaded the data from the European Nucleotide Archive, http://www.ebi.ac.uk/ena/data/view/PRJEB6989, and ran the data through our full-length pipeline, using STAR to map to the mouse genome (mm10). There did not seem to be any ERCC spike-ins used in this dataset.
+
+# Load R libraries, and useful R functions
+
+```{r,libraries,cache=FALSE}
+library(edgeR)
+library(RColorBrewer)
+library(org.Mm.eg.db)
+library(limma)
+```
+```{r,myRfunctions}
+source("/group/bioi1/belinda/SingleCell/Normalisation/normCounts.R")
+```
+```{r}
+ggplotColors <- function(g){
+
+  d <- 360/g
+
+  h <- cumsum(c(15, rep(d,g - 1)))
+
+  hcl(h = h, c = 100, l = 65)
+
+}
+```
+
+# Reading in the data
+```{r}
+# Load in star data
+data.buett <- read.delim("/group/bioi1/shared/public_data/Buettner-mESCs-scRNAseq/counts/counts.txt",stringsAsFactors=FALSE,skip=1)
+colnames(data.buett) <- gsub("X\\.group\\.bioi1\\.shared\\.public_data\\.Buettner\\.mESCs\\.scRNAseq\\.STAR\\.2pass\\.","",colnames(data.buett))
+colnames(data.buett) <- gsub("\\.Aligned\\.out\\.bam","",colnames(data.buett))
+rownames(data.buett) <- gsub("\\..*","",data.buett$Geneid)
+
+counts.buett <- data.buett[,-(1:6)]
+rownames(counts.buett) <- gsub("\\..*","",data.buett$Geneid)
+
+# load mm10 gene length information
+mm10.length <- read.table("mm10-length.txt",header=TRUE,stringsAsFactors = FALSE)
+```
+
+# Quality control of the cells
+## QC plots
+
+Before any analysis, the quality of the cells was examined by looking at the dropout and total library size of each cell. 
+
+```{r}
+# Calculate dropout and library size
+dropout <- colSums(counts.buett==0)/nrow(counts.buett)
+lib.size <- colSums(counts.buett)
+```
+
+```{r}
+par(mar=c(5,4,2,2))
+par(mfrow=c(1,2))
+plot(dropout,lib.size,xlab="Proportion Zeroes in Single Cells",ylab="Library size")
+abline(v=0.85,h=1000000,lty=2)
+```
+
+## Filtering out cells
+We decide to filter out cells with > 85% dropout and sequencing depth less than 1000000.
+
+```{r}
+keep1 <- dropout<0.85 & lib.size>1000000
+counts.keep <- counts.buett[,keep1]
+dim(counts.keep)
+```
+This leaves `r ncol(counts.keep)` cells for further analysis.
+
+## Filtering out genes
+We chose to filter out genes that had more than 90% zeroes.
+```{r}
+# Filter out genes where > 90% of the cells are zeroes
+propZ_genes <- rowSums(counts.keep==0)/ncol(counts.keep)
+counts.keep <- counts.keep[propZ_genes<=0.9,]
+dim(counts.keep)
+```
+This left `r nrow(counts.keep)` genes for further analysis. We finally check an MDSplot with PC1 and PC2.
+
+```{r}
+plotMDS.DGEList(DGEList(counts.keep),pch=16,gene.selection = "common")
+```
+
+# Converting to DGEList, adding gene annotation
+```{r,cache=TRUE}
+y <- DGEList(counts.keep)
+```
+```{r,cache=TRUE}
+#annotation
+ens <- toTable(org.Mm.egENSEMBL)
+m <- match(rownames(y),ens$ensembl_id)
+ann <- data.frame(Original_ID=rownames(y),ens[m,])
+rownames(ann) <- rownames(y)
+symbol <- toTable(org.Mm.egSYMBOL)
+m <- match(ann$gene_id,symbol$gene_id)
+ann$symbol <- symbol$symbol[m]
+chr <- toTable(org.Mm.egCHR)
+m <- match(ann$gene_id,chr$gene_id)
+ann$chr <- chr$chromosome[m]
+genename <- toTable(org.Mm.egGENENAME)
+m <- match(ann$gene_id,genename$gene_id)
+ann$genename <- genename$gene_name[m]
+m <- match(rownames(y),mm10.length$EnsID)
+ann$length <- mm10.length$Length[m]
+
+y$genes <- ann
+```
+
+# Filtering out additional genes based on annotation
+We decided to filter out mitochondrial and ribosomal genes, as well as genes that lack an Entrez gene id. This was to clean up the dataset as much as possible and stick to well annotated genes.
+
+```{r}
+mito <- grep("mitochondrial",y$genes$genename)
+ribo <- grep("ribosomal",y$genes$genename)
+chrm <- grep("MT",y$genes$chr)
+junk <- unique(c(mito,ribo,chrm))
+length(junk)
+y <- y[-junk,]
+y <- y[!is.na(y$genes$gene_id),]
+y <- y[!is.na(y$genes$length),]
+dim(y)
+y$samples$lib.size <- colSums(y$counts)
+y.buett <- y
+save(y.buett,file="./mESCs-data/buett.Rdata")
+```
+This leaves `r ncol(y)` cells and `r nrow(y)` genes for further analysis.
+
+# Gene length bias
+We binned genes into 10 roughly equal bins based on gene length, with roughly 1100 genes in each bin.
+```{r,cache=TRUE}
+lcpm <- normCounts(y,log=TRUE,prior.count=1)
+lrpkm <- rpkm(y,log=TRUE,prior.count=1)
+propZ_genes <- rowSums(y$counts==0)/ncol(y)
+```
+
+```{r}
+# Binning according to gene length
+q<-quantile(sqrt(y$genes$length),probs=seq(0.1,1,0.1))
+decile <- rep(NA,nrow(y))
+decile[sqrt(y$genes$length)<=q[1]] <- 1
+for(i in 2:10) decile[sqrt(y$genes$length)>q[i-1] & sqrt(y$genes$length)<=q[i]] <- i
+```
+
+# Figure for paper:
+
+```{r,fig1A,cache=FALSE,fig.width=12,fig.height=5}
+par(mar=c(8.5,4.5,3,2))
+par(mfrow=c(1,3))
+par(mgp=c(3,1,0))
+
+q2 <- c(0,q^2)
+labels <- rep(NA,10)
+for(i in 1:10) labels[i] <-paste(round(q2[i]),"-",round(q2[i+1]),sep="")
+
+boxplot(rowMeans(lcpm)~decile,ylab="AvgLogCounts",cex.lab=1.5,cex.axis=1.2,names=labels,las=2,ylim=c(0,12))
+title("(a) Mouse ESCs, full-length",cex.main=1.5)
+title(xlab="Gene length",cex.lab=1.5,line=7)
+boxplot(propZ_genes~decile,ylab="Proportion zeroes in each gene",cex.lab=1.5,cex.axis=1.2,names=labels,las=2)
+title("(b) Mouse ESCs, full-length",cex.main=1.5)
+title(xlab="Gene length",cex.lab=1.5,line=7)
+boxplot(rowMeans(lrpkm)~decile,ylab="AvgLogRPKM",cex.lab=1.5,cex.axis=1.2,names=labels,las=2)
+title("(c) Mouse ESCs, full-length",cex.main=1.5)
+title(xlab="Gene length",cex.lab=1.5,line=7)
+```
+
+```{r}
+save(lcpm,decile,labels,propZ_genes,lrpkm,file="./figuresForPaper/Buett-genelength.Rdata")
+```
+
+
+
